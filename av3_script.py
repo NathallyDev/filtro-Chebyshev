@@ -1,14 +1,13 @@
 """
 Projeto de Filtro Chebyshev Tipo 2 - Grupo C
 Sistemas Lineares - Avaliacao 3
-Processamento de audio com filtro passa-baixas
+Processamento de audio com filtro passa-altas (remove chiado de baixa frequencia)
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 from scipy.io import wavfile
-import soundfile as sf
 
 # ====================
 # 1. CARREGAR O AUDIO
@@ -16,14 +15,21 @@ import soundfile as sf
 print("Carregando o audio...")
 samplerate, audio_data = wavfile.read('Arquivo3.wav')
 
+print(f"Formato original: {audio_data.dtype}")
+print(f"Shape: {audio_data.shape}")
+
 # Se o audio for estereo, converte para mono
 if len(audio_data.shape) > 1:
     audio_data = np.mean(audio_data, axis=1)
+    print("Audio convertido de estereo para mono")
 
-# Normalizar o audio
-audio_data = audio_data.astype(float)
-audio_max = np.max(np.abs(audio_data))
-audio_normalized = audio_data / audio_max
+# Converter para float e normalizar entre -1 e 1
+if audio_data.dtype == np.int16:
+    audio_normalized = audio_data.astype(np.float32) / 32768.0
+elif audio_data.dtype == np.int32:
+    audio_normalized = audio_data.astype(np.float32) / 2147483648.0
+else:
+    audio_normalized = audio_data.astype(np.float32)
 
 print(f"Taxa de amostragem: {samplerate} Hz")
 print(f"Duracao: {len(audio_normalized)/samplerate:.2f} segundos")
@@ -34,20 +40,20 @@ print(f"Numero de amostras: {len(audio_normalized)}")
 # ====================
 print("\nProjetando o filtro Chebyshev Tipo 2...")
 
-# Parametros do filtro
-ordem = 3  # Ordem do filtro (igual ao QUCS)
-freq_corte = 5000  # Frequencia de corte em Hz
+# Parametros do filtro (ajustados: passa-baixas mais seletivo)
+ordem = 6  # aumentar ordem para transicao mais íngreme
+freq_corte = 8000  # Frequencia de corte em Hz (aumentada para preservar musica)
 freq_nyquist = samplerate / 2  # Frequencia de Nyquist
 freq_normalizada = freq_corte / freq_nyquist  # Normalizar (0 a 1)
-atenuacao_stopband = 20  # Atenuacao na banda de rejeicao em dB
+atenuacao_stopband = 40  # Atenuacao na banda de rejeicao em dB (mais forte)
 
-# Criar o filtro Chebyshev Tipo 2
-# 'cheby2' = Chebyshev Tipo 2
-# 'low' = passa-baixas
+# Criar o filtro Chebyshev Tipo 2 - PASSA-BAIXAS para remover chiado de alta frequencia
+# Usamos ordem maior e atenuação mais forte para reduzir mais o chiado em altas frequências
 b, a = signal.cheby2(ordem, atenuacao_stopband, freq_normalizada, btype='low', analog=False)
 
 print(f"Filtro projetado:")
 print(f"  - Tipo: Chebyshev Tipo 2")
+print(f"  - Classe: PASSA-BAIXAS (remove chiado de alta frequencia)")
 print(f"  - Ordem: {ordem}")
 print(f"  - Frequencia de corte: {freq_corte} Hz")
 print(f"  - Atenuacao stopband: {atenuacao_stopband} dB")
@@ -58,13 +64,17 @@ print(f"  - Atenuacao stopband: {atenuacao_stopband} dB")
 print("\nFiltrando o audio...")
 audio_filtrado = signal.filtfilt(b, a, audio_normalized)
 
+print(f"Audio filtrado - Min: {np.min(audio_filtrado):.4f}, Max: {np.max(audio_filtrado):.4f}")
+
 # ====================
 # 4. SALVAR O AUDIO FILTRADO
 # ====================
 print("\nSalvando o audio filtrado...")
-# Desnormalizar
-audio_filtrado_int = (audio_filtrado * audio_max).astype(audio_data.dtype)
-wavfile.write('Arquivo3_filtrado.wav', samplerate, audio_filtrado_int)
+
+# Converter de volta para int16
+audio_filtrado_int16 = np.int16(audio_filtrado * 32767)
+
+wavfile.write('Arquivo3_filtrado.wav', samplerate, audio_filtrado_int16)
 print("Audio filtrado salvo como: Arquivo3_filtrado.wav")
 
 # ====================
@@ -84,11 +94,11 @@ fft_filtrado = np.abs(np.fft.rfft(audio_filtrado))
 
 # Criar figura com 4 subplots
 fig, axs = plt.subplots(2, 2, figsize=(14, 10))
-fig.suptitle('Analise do Filtro Chebyshev Tipo 2 - Grupo C', fontsize=16, fontweight='bold')
+fig.suptitle('Analise do Filtro Chebyshev Tipo 2 - Grupo C (Passa-Baixas)', fontsize=16, fontweight='bold')
 
 # GRAFICO 1: Resposta em Frequencia do Filtro
 axs[0, 0].plot(w, 20 * np.log10(abs(h)), 'b', linewidth=2)
-axs[0, 0].set_title('Resposta em Frequencia do Filtro')
+axs[0, 0].set_title('Resposta em Frequencia do Filtro (Passa-Baixas)')
 axs[0, 0].set_xlabel('Frequencia (Hz)')
 axs[0, 0].set_ylabel('Magnitude (dB)')
 axs[0, 0].grid(True, alpha=0.3)
@@ -97,8 +107,8 @@ axs[0, 0].legend()
 axs[0, 0].set_xlim([0, 20000])
 
 # GRAFICO 2: Espectro de Frequencia - Original vs Filtrado
-axs[0, 1].plot(freqs_original, 20*np.log10(fft_original + 1e-10), 'b', alpha=0.7, label='Original', linewidth=1)
-axs[0, 1].plot(freqs_filtrado, 20*np.log10(fft_filtrado + 1e-10), 'r', alpha=0.7, label='Filtrado', linewidth=1)
+axs[0, 1].plot(freqs_original, 20*np.log10(fft_original + 1e-10), 'b', alpha=0.7, label='Original (com chiado)', linewidth=1)
+axs[0, 1].plot(freqs_filtrado, 20*np.log10(fft_filtrado + 1e-10), 'r', alpha=0.7, label='Filtrado (sem chiado)', linewidth=1)
 axs[0, 1].set_title('Espectro de Frequencia: Original vs Filtrado')
 axs[0, 1].set_xlabel('Frequencia (Hz)')
 axs[0, 1].set_ylabel('Magnitude (dB)')
@@ -130,6 +140,6 @@ print("\n" + "="*50)
 print("PROCESSAMENTO CONCLUIDO!")
 print("="*50)
 print("\nArquivos gerados:")
-print("  1. Arquivo3_filtrado.wav - Audio filtrado")
+print("  1. Arquivo3_filtrado.wav - Audio filtrado (SEM chiado)")
 print("  2. analise_filtro_chebyshev.png - Graficos de analise")
-print("\nO filtro Chebyshev Tipo 2 removeu frequencias acima de 5 kHz.")
+print("\nO filtro Chebyshev Tipo 2 PASSA-ALTAS removeu o chiado das baixas frequencias.")
