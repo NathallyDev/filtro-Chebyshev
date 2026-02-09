@@ -40,29 +40,24 @@ print(f"Numero de amostras: {len(audio_normalized)}")
 # ====================
 print("\nProjetando o filtro Chebyshev Tipo 2...")
 
-# Parametros do filtro (ajustados: passa-baixas mais seletivo)
-ordem = 6  # aumentar ordem para transicao mais íngreme
-freq_corte = 8000  # Frequencia de corte em Hz (aumentada para preservar musica)
-freq_nyquist = samplerate / 2  # Frequencia de Nyquist
-freq_normalizada = freq_corte / freq_nyquist  # Normalizar (0 a 1)
-atenuacao_stopband = 40  # Atenuacao na banda de rejeicao em dB (mais forte)
-
-# Criar o filtro Chebyshev Tipo 2 - PASSA-BAIXAS para remover chiado de alta frequencia
-# Usamos ordem maior e atenuação mais forte para reduzir mais o chiado em altas frequências
-b, a = signal.cheby2(ordem, atenuacao_stopband, freq_normalizada, btype='low', analog=False)
+# Parametros do filtro (usar FIR passa-baixas linear-phase)
+# FIR tende a preservar melhor a sonoridade e não amplifica ruído
+numtaps = 801  # número de coeficientes do filtro FIR (maior = transição mais íngreme)
+freq_corte = 6000  # cortar frequências acima de 6 kHz
 
 print(f"Filtro projetado:")
-print(f"  - Tipo: Chebyshev Tipo 2")
+print(f"  - Tipo: FIR (linear-phase)")
 print(f"  - Classe: PASSA-BAIXAS (remove chiado de alta frequencia)")
-print(f"  - Ordem: {ordem}")
+print(f"  - Num taps: {numtaps}")
 print(f"  - Frequencia de corte: {freq_corte} Hz")
-print(f"  - Atenuacao stopband: {atenuacao_stopband} dB")
 
 # ====================
 # 3. APLICAR O FILTRO NO AUDIO
 # ====================
-print("\nFiltrando o audio...")
-audio_filtrado = signal.filtfilt(b, a, audio_normalized)
+print("\nFiltrando o audio com FIR passa-baixas...")
+# projetar kernel FIR e aplicar (lfilter é suficiente para FIR)
+fir_kernel = signal.firwin(numtaps, freq_corte, fs=samplerate, window='hamming')
+audio_filtrado = signal.lfilter(fir_kernel, [1.0], audio_normalized)
 
 print(f"Audio filtrado - Min: {np.min(audio_filtrado):.4f}, Max: {np.max(audio_filtrado):.4f}")
 
@@ -82,8 +77,8 @@ print("Audio filtrado salvo como: Arquivo3_filtrado.wav")
 # ====================
 print("\nGerando graficos...")
 
-# Calcular a resposta em frequencia do filtro
-w, h = signal.freqz(b, a, worN=8000, fs=samplerate)
+# Calcular a resposta em frequencia do filtro (FIR)
+w, h = signal.freqz(fir_kernel, [1.0], worN=8000, fs=samplerate)
 
 # Calcular o espectro de frequencia dos audios
 freqs_original = np.fft.rfftfreq(len(audio_normalized), 1/samplerate)
@@ -142,4 +137,4 @@ print("="*50)
 print("\nArquivos gerados:")
 print("  1. Arquivo3_filtrado.wav - Audio filtrado (SEM chiado)")
 print("  2. analise_filtro_chebyshev.png - Graficos de analise")
-print("\nO filtro Chebyshev Tipo 2 PASSA-ALTAS removeu o chiado das baixas frequencias.")
+print("\nO filtro FIR passa-baixas removeu (ou atenuou) o chiado em altas frequencias.")
