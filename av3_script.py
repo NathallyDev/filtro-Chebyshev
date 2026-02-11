@@ -34,13 +34,19 @@ VAD_ENERGY_THRESHOLD = 0.005  # limiar de energia relativa
 VAD_FREQ_RANGE = (80, 8000)   # faixa de frequência típica da voz
 
 # === Wiener Filter (ULTRA AGRESSIVO) ===
-WIENER_ALPHA = 6.0           # maximo agressivo
-WIENER_FLOOR = 0.02          # muito muito baixo (quase silencia tudo fraco)
-NOISE_PERCENT = 0.40         # detecta 40% dos frames como ruido
+WIENER_ALPHA = 5.5           # aumentado um pouco para mais reducao
+WIENER_FLOOR = 0.025         # reduzido para mais agressividade
+NOISE_PERCENT = 0.38         # aumentado um pouco
 
 # === Spectral Gating ===
 ENABLE_SPECTRAL_GATE = True
-GATE_THRESHOLD = 0.08        # limiar de gate MUITO agressivo (silencia valores baixos)
+GATE_THRESHOLD = 0.05        # AUMENTADO para ser muito menos agressivo (preserva musica)
+
+# === Noise Gate no dominio do tempo ===
+ENABLE_NOISE_GATE = True
+NOISE_GATE_THRESHOLD = 0.008   # MUITO verdade conservador agora (quase nao funciona)
+NOISE_GATE_ATTACK_MS = 5      # ataque rapido (5ms)
+NOISE_GATE_RELEASE_MS = 100   # release lento (100ms)
 
 # === Spectral Subtraction ===
 SPECTRAL_SUB_FACTOR = 0.6    # fator de subtração espectral (0.5~0.8, mais baixo = menos agressivo)
@@ -50,7 +56,7 @@ SPECTRAL_SUB_FACTOR = 0.6    # fator de subtração espectral (0.5~0.8, mais bai
 ENABLE_CHEBY2 = True
 CHEBY2_ORDER = 8             # ordem MUITO alta (extremamente abrupto)
 CHEBY2_RS_DB = 100            # atenuacao maxima
-CHEBY2_CUTOFF_HZ = 8000      # corta TUDO acima de 8kHz (remove MUITO chiado)
+CHEBY2_CUTOFF_HZ = 7000      # REDUZIDO para 7kHz para cortar mais xiado
 
 # Passa-altos para remover ruído grave
 ENABLE_HPF = True
@@ -206,6 +212,32 @@ def apply_hpf_filter(x: np.ndarray, fs: int, cutoff_hz: float) -> np.ndarray:
     return signal.sosfiltfilt(sos, x, axis=0)
 
 
+def apply_noise_gate(x: np.ndarray, fs: int, threshold: float, attack_ms: float, release_ms: float) -> np.ndarray:
+    """
+    Noise gate simples: muta completamente quando sinal esta muito fraco.
+    Reduz drasticamente o ruido residual nos silencios.
+    """
+    # Calcula RMS por bloco pequeno (janela movel)
+    block_size = int(fs * 0.01)  # 10ms blocos
+    n_blocks = len(x) // block_size
+    
+    # Calcula amplitude por bloco
+    rms_blocks = np.array([np.sqrt(np.mean(x[i*block_size:(i+1)*block_size]**2)) 
+                           for i in range(n_blocks)])
+    
+    # Expande para tamanho original
+    gate_mask = np.repeat(rms_blocks < threshold, block_size)
+    gate_mask = np.concatenate([gate_mask, np.zeros(len(x) - len(gate_mask), dtype=bool)])
+    
+    # Aplica gate: onde e True (fraco), zera o audio
+    x_gated = x.copy()
+    x_gated[gate_mask] = 0
+    
+    print(f"  Noise Gate: threshold={threshold:.3f}, silenciou {np.sum(gate_mask)/len(x)*100:.1f}% do audio")
+    
+    return x_gated
+
+
 # =========================
 # PIPELINE PRINCIPAL
 # =========================
@@ -250,6 +282,12 @@ if ENABLE_HPF:
     print(f"\n[3B] Aplicando passa-altos agressivo...")
     y = apply_hpf_filter(y, fs, HPF_CUTOFF_HZ)
 
+# === 3C. NOISE GATE (muta completamente os silencios) ===
+if ENABLE_NOISE_GATE:
+    print(f"\n[3C] Aplicando noise gate (muta silencios)...")
+    for ch in range(y.shape[1]):
+        y[:, ch] = apply_noise_gate(y[:, ch], fs, NOISE_GATE_THRESHOLD, NOISE_GATE_ATTACK_MS, NOISE_GATE_RELEASE_MS)
+
 # === 4. GANHO FINAL ===
 print("\n[4] Aplicando ganho final...")
 y = apply_gain_db(y, OUTPUT_GAIN_DB)
@@ -285,6 +323,7 @@ print(f"  - Wiener Floor: {WIENER_FLOOR}")
 print(f"  - Spectral Gate: {GATE_THRESHOLD}")
 print(f"  - Chebyshev ordem: {CHEBY2_ORDER}, fc: {CHEBY2_CUTOFF_HZ} Hz")
 print(f"  - Passa-altos: {HPF_CUTOFF_HZ} Hz")
+print(f"  - Noise Gate: {NOISE_GATE_THRESHOLD} (muta silencios)")
 print(f"  - Ganho saida: {OUTPUT_GAIN_DB} dB")
 print(f"\n[OK] Pronto para audicao!")
 print("=" * 60)
