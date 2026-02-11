@@ -1,150 +1,117 @@
-"""
-Projeto de Filtro - Grupo C
-Sistemas Lineares - Avaliacao 3
-Processamento de audio com filtro passa-altas (remove chiado de baixa frequencia)
-"""
-
+import argparse
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy import signal
 from scipy.io import wavfile
+from scipy import signal
 
-# ====================
-# 1. CARREGAR O AUDIO
-# ====================
-print("Carregando o audio...")
-samplerate, audio_data = wavfile.read('Arquivo3.wav')
 
-print(f"Formato original: {audio_data.dtype}")
-print(f"Shape: {audio_data.shape}")
+def to_mono(x: np.ndarray) -> np.ndarray:
+    if x.ndim == 1:
+        return x
+    return x.mean(axis=1)
 
-# Se o audio for estereo, converte para mono
-if len(audio_data.shape) > 1:
-    audio_data = np.mean(audio_data, axis=1)
-    print("Audio convertido de estereo para mono")
 
-# Converter para float e normalizar entre -1 e 1
-if audio_data.dtype == np.int16:
-    audio_normalized = audio_data.astype(np.float32) / 32768.0
-elif audio_data.dtype == np.int32:
-    audio_normalized = audio_data.astype(np.float32) / 2147483648.0
-else:
-    audio_normalized = audio_data.astype(np.float32)
+def pcm_to_float(x: np.ndarray) -> np.ndarray:
+    # int16 -> float [-1,1]
+    if np.issubdtype(x.dtype, np.integer):
+        maxv = np.iinfo(x.dtype).max
+        return x.astype(np.float64) / maxv
+    return x.astype(np.float64)
 
-print(f"Taxa de amostragem: {samplerate} Hz")
-print(f"Duracao: {len(audio_normalized)/samplerate:.2f} segundos")
-print(f"Numero de amostras: {len(audio_normalized)}")
 
-# ====================
-# 2. PROJETAR O FILTRO FIR PASSA-ALTAS
-# ====================
-print("\nProjetando o filtro FIR Passa-Altas...")
+def float_to_int16(x: np.ndarray) -> np.ndarray:
+    x = np.clip(x, -1.0, 1.0)
+    return (x * 32767.0).astype(np.int16)
 
-# Ajuste AQUI a frequencia de corte:
-# - 80 a 150 Hz: remove rumble/vento
-# - 150 a 300 Hz: remove "grave embolado"
-# - 300+ Hz: já começa a afinar voz/música
-freq_corte = 300  # Hz  (troque conforme seu audio)
-numtaps = 801      # ímpar é melhor para highpass FIR (linear-phase)
 
-print(f"Filtro projetado:")
-print(f"  - Tipo: FIR (linear-phase)")
-print(f"  - Classe: PASSA-ALTAS (remove chiado de baixa frequencia)")
-print(f"  - Num taps: {numtaps}")
-print(f"  - Frequencia de corte: {freq_corte} Hz")
+def design_cheby2_bandpass(fs, f1, f2, order=6, rs=80):
+    nyq = fs / 2.0
+    w1, w2 = f1 / nyq, f2 / nyq
+    if not (0 < w1 < w2 < 1):
+        raise ValueError(f"Faixa inválida: f1={f1}, f2={f2}, nyq={nyq}")
+    sos = signal.cheby2(
+        N=order,
+        rs=rs,                # atenuação na rejeição (dB)
+        Wn=[w1, w2],
+        btype="bandpass",
+        output="sos"
+    )
+    return sos
 
-# Kernel FIR highpass
-fir_kernel = signal.firwin(
-    numtaps,
-    freq_corte,
-    fs=samplerate,
-    window='hamming',
-    pass_zero=False  # <<< HIGH-PASS
-)
 
-# ====================
-# 3. APLICAR O FILTRO NO AUDIO
-# ====================
-print("\nFiltrando o audio com FIR passa-altas...")
+def plot_response(sos, fs):
+    w, h = signal.sosfreqz(sos, worN=4096, fs=fs)
+    mag = 20 * np.log10(np.maximum(np.abs(h), 1e-12))
+    plt.figure()
+    plt.plot(w, mag)
+    plt.title("Resposta em frequência (Chebyshev II - Passa-faixa)")
+    plt.xlabel("Frequência (Hz)")
+    plt.ylabel("Magnitude (dB)")
+    plt.grid(True)
 
-# Use filtfilt para evitar atraso (zero-phase)
-audio_filtrado = signal.filtfilt(fir_kernel, [1.0], audio_normalized)
 
-# Proteção: evitar clip ao salvar
-audio_filtrado = np.clip(audio_filtrado, -1.0, 1.0)
+def plot_psd(x, y, fs):
+    f1, p1 = signal.welch(x, fs=fs, nperseg=4096)
+    f2, p2 = signal.welch(y, fs=fs, nperseg=4096)
+    plt.figure()
+    plt.semilogy(f1, p1, label="Antes")
+    plt.semilogy(f2, p2, label="Depois")
+    plt.title("PSD (Welch) - Antes vs Depois")
+    plt.xlabel("Frequência (Hz)")
+    plt.ylabel("Potência")
+    plt.grid(True, which="both")
+    plt.legend()
 
-print(f"Audio filtrado - Min: {np.min(audio_filtrado):.4f}, Max: {np.max(audio_filtrado):.4f}")
 
-# ====================
-# 4. SALVAR O AUDIO FILTRADO
-# ====================
-print("\nSalvando o audio filtrado...")
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="in_wav", default="Arquivo3.wav")
+    ap.add_argument("--out", dest="out_wav", default="Arquivo3_filtrado.wav")
+    ap.add_argument("--f1", type=float, default=150.0, help="Corte inferior (Hz)")
+    ap.add_argument("--f2", type=float, default=4000.0, help="Corte superior (Hz)")
+    ap.add_argument("--order", type=int, default=6, help="Ordem do Cheby2 (ex: 6 ou 8)")
+    ap.add_argument("--rs", type=float, default=80.0, help="Atenuação rejeição (dB) (ex: 60-100)")
+    ap.add_argument("--no-plots", action="store_true")
+    args = ap.parse_args()
 
-audio_filtrado_int16 = np.int16(audio_filtrado * 32767)
-wavfile.write('Arquivo3_filtrado_passa_alta.wav', samplerate, audio_filtrado_int16)
-print("Audio filtrado salvo como: Arquivo3_filtrado_passa_alta.wav")
+    fs, x = wavfile.read(args.in_wav)
+    print(f"Entrada: {args.in_wav} | fs={fs} | dtype={x.dtype} | shape={x.shape}")
 
-# ====================
-# 5. GERAR GRAFICOS
-# ====================
-print("\nGerando graficos...")
+    x = to_mono(x)
+    x = pcm_to_float(x)
 
-w, h = signal.freqz(fir_kernel, [1.0], worN=8000, fs=samplerate)
+    print(f"Peak antes: {np.max(np.abs(x)):.4f}")
 
-freqs_original = np.fft.rfftfreq(len(audio_normalized), 1/samplerate)
-fft_original = np.abs(np.fft.rfft(audio_normalized))
+    # Projeta Cheby2 passa-faixa
+    sos = design_cheby2_bandpass(fs, args.f1, args.f2, order=args.order, rs=args.rs)
+    print(f"Filtro: Cheby2 passa-faixa | ordem={args.order} | rs={args.rs} dB | faixa={args.f1}-{args.f2} Hz")
 
-freqs_filtrado = np.fft.rfftfreq(len(audio_filtrado), 1/samplerate)
-fft_filtrado = np.abs(np.fft.rfft(audio_filtrado))
+    # Filtra com fase zero
+    y = signal.sosfiltfilt(sos, x)
 
-fig, axs = plt.subplots(2, 2, figsize=(14, 10))
-fig.suptitle('Analise do Filtro FIR - Grupo C (Passa-Altas)', fontsize=16, fontweight='bold')
+    # Normaliza apenas se precisar (evita clipping)
+    peak = np.max(np.abs(y))
+    print(f"Peak depois (antes de normalizar): {peak:.4f}")
+    if peak > 1.0:
+        y = y / peak
+        print("Normalizado para evitar clipping.")
 
-# GRAFICO 1: Resposta em Frequencia do Filtro
-axs[0, 0].plot(w, 20 * np.log10(np.maximum(np.abs(h), 1e-12)), linewidth=2)
-axs[0, 0].set_title('Resposta em Frequencia do Filtro (Passa-Altas)')
-axs[0, 0].set_xlabel('Frequencia (Hz)')
-axs[0, 0].set_ylabel('Magnitude (dB)')
-axs[0, 0].grid(True, alpha=0.3)
-axs[0, 0].axvline(freq_corte, linestyle='--', label=f'Corte: {freq_corte} Hz')
-axs[0, 0].legend()
-axs[0, 0].set_xlim([0, 20000])
+    wavfile.write(args.out_wav, fs, float_to_int16(y))
+    print(f"Saída salva: {args.out_wav}")
 
-# GRAFICO 2: Espectro de Frequencia - Original vs Filtrado
-axs[0, 1].plot(freqs_original, 20*np.log10(fft_original + 1e-10), alpha=0.7, label='Original', linewidth=1)
-axs[0, 1].plot(freqs_filtrado, 20*np.log10(fft_filtrado + 1e-10), alpha=0.7, label='Filtrado (passa-altas)', linewidth=1)
-axs[0, 1].set_title('Espectro de Frequencia: Original vs Filtrado')
-axs[0, 1].set_xlabel('Frequencia (Hz)')
-axs[0, 1].set_ylabel('Magnitude (dB)')
-axs[0, 1].grid(True, alpha=0.3)
-axs[0, 1].legend()
-axs[0, 1].set_xlim([0, 20000])
+    if not args.no_plots:
+        plot_response(sos, fs)
+        plot_psd(x, y, fs)
+        plt.figure()
+        t = np.arange(min(len(x), int(0.05*fs))) / fs
+        plt.plot(t, x[:len(t)], label="Antes")
+        plt.plot(t, y[:len(t)], label="Depois")
+        plt.title("Forma de onda (primeiros 50 ms)")
+        plt.xlabel("Tempo (s)")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
 
-# GRAFICO 3: Forma de Onda - Original
-time = np.arange(len(audio_normalized)) / samplerate
-N = int(0.05 * samplerate)
-axs[1, 0].plot(time[:N], audio_normalized[:N], linewidth=0.5)
-axs[1, 0].set_title('Forma de Onda - Audio Original (primeiros 50ms)')
-axs[1, 0].set_xlabel('Tempo (s)')
-axs[1, 0].set_ylabel('Amplitude')
-axs[1, 0].grid(True, alpha=0.3)
 
-# GRAFICO 4: Forma de Onda - Filtrado
-axs[1, 1].plot(time[:N], audio_filtrado[:N], linewidth=0.5)
-axs[1, 1].set_title('Forma de Onda - Audio Filtrado (primeiros 50ms)')
-axs[1, 1].set_xlabel('Tempo (s)')
-axs[1, 1].set_ylabel('Amplitude')
-axs[1, 1].grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.savefig('analise_filtro_passa_alta.png', dpi=300, bbox_inches='tight')
-print("Graficos salvos como: analise_filtro_passa_alta.png")
-plt.show()
-
-print("\n" + "="*50)
-print("PROCESSAMENTO CONCLUIDO!")
-print("="*50)
-print("\nArquivos gerados:")
-print("  1. Arquivo3_filtrado_passa_alta.wav - Audio filtrado (passa-altas)")
-print("  2. analise_filtro_passa_alta.png - Graficos de analise")
-print("\nO filtro FIR passa-altas atenuou as baixas frequencias (chiado/rumble).")
+if __name__ == "__main__":
+    main()
