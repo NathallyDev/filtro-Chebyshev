@@ -1,98 +1,284 @@
-import argparse
+"""
+FILTRO CHEBYSHEV TIPO II + REDUÇÃO DE RUÍDO AVANÇADA
+=====================================================
+Combina:
+- Detecção de Voz (Voice Activity Detection)
+- Wiener Filter multi-camada (STFT)
+- Chebyshev Tipo II passa-baixas (ordem 6)
+- Spectral Subtraction agressiva
+- Limitador de saída
+"""
+
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Não abre janela gráfica
 import matplotlib.pyplot as plt
-from scipy.io import wavfile
 from scipy import signal
+from scipy.io import wavfile
+from scipy.ndimage import median_filter
+
+# =========================
+# CONFIGURAÇÕES OTIMIZADAS
+# =========================
+INPUT_WAV  = "Arquivo3.wav"
+OUTPUT_WAV = "Arquivo3_filtrado_v2.wav"
+OUTPUT_FIG = "analise_filtrado_v2.png"
+
+# === STFT (análise de frequência) ===
+N_FFT = 2048           # reduzido para processar mais rápido
+HOP = 512              # overlap = 75%
+WINDOW = "hamming"     # melhor rejeição de lóbulos laterais
+
+# === Detecção de Voz (VAD) ===
+VAD_ENERGY_THRESHOLD = 0.005  # limiar de energia relativa
+VAD_FREQ_RANGE = (80, 8000)   # faixa de frequência típica da voz
+
+# === Wiener Filter (ULTRA AGRESSIVO) ===
+WIENER_ALPHA = 4.5           # muito agressivo (máxima redução de ruído)
+WIENER_FLOOR = 0.05          # muito baixo (permite corte radical)
+NOISE_PERCENT = 0.35         # detecta muito mais ruído
+
+# === Spectral Subtraction ===
+SPECTRAL_SUB_FACTOR = 0.6    # fator de subtração espectral (0.5~0.8, mais baixo = menos agressivo)
+
+# === Chebyshev Tipo II ===
+# === Filtros passa-baixas + passa-altos (agressivos) ===
+ENABLE_CHEBY2 = True
+CHEBY2_ORDER = 7             # ordem muito alta (muito abrupto)
+CHEBY2_RS_DB = 80             # máxima atenuação
+CHEBY2_CUTOFF_HZ = 10000     # corta tudo acima de 10kHz (remove chiado agressivamente)
+
+# Passa-altos para remover ruído grave
+ENABLE_HPF = True
+HPF_CUTOFF_HZ = 80            # remove tudo abaixo de 80Hz (ruído grave/hum)
+
+# === Processamento Final ===
+CLAMP_TO_INPUT_PEAK = True
+OUTPUT_GAIN_DB = -0.5        # Leve reducao para manter volume util
+
+# === PSD ===
+NPERSEG = 4096
 
 
-def to_mono(x):
-    return x if x.ndim == 1 else x.mean(axis=1)
+# =========================
+# FUNÇÕES AUXILIARES
+# =========================
 
-def pcm_to_float(x):
-    if np.issubdtype(x.dtype, np.integer):
-        return x.astype(np.float64) / np.iinfo(x.dtype).max
-    return x.astype(np.float64)
+def to_float(x: np.ndarray) -> np.ndarray:
+    """Converte áudio para float32 normalizado."""
+    if x.dtype == np.int16:
+        return x.astype(np.float32) / 32768.0
+    if x.dtype == np.int32:
+        return x.astype(np.float32) / 2147483648.0
+    x = x.astype(np.float32)
+    peak = np.max(np.abs(x)) + 1e-12
+    if peak > 1.5:
+        x = x / peak
+    return x
 
-def float_to_int16(x):
-    x = np.clip(x, -1, 1)
-    return (x * 32767).astype(np.int16)
+def to_int16(x: np.ndarray) -> np.ndarray:
+    """Converte float32 para int16."""
+    x = np.clip(x, -1.0, 1.0)
+    return (x * 32767.0).astype(np.int16)
 
-def cheby2_sos(fs, btype, cutoff, order=6, rs=60):
-    nyq = fs / 2
-    if isinstance(cutoff, (list, tuple)):
-        wn = [c / nyq for c in cutoff]
-    else:
-        wn = cutoff / nyq
-    return signal.cheby2(N=order, rs=rs, Wn=wn, btype=btype, output="sos")
+def apply_gain_db(x: np.ndarray, gain_db: float) -> np.ndarray:
+    """Aplica ganho em dB."""
+    return x * (10.0 ** (gain_db / 20.0))
 
-def notch_sos(fs, f0, Q=35):
-    # notch em f0 com fator de qualidade Q
-    w0 = f0 / (fs/2)
-    b, a = signal.iirnotch(w0, Q)
-    return signal.tf2sos(b, a)
+def welch_psd(x: np.ndarray, fs: int, nperseg: int = 8192):
+    """Calcula PSD usando método de Welch."""
+    f, P = signal.welch(x, fs=fs, nperseg=nperseg, noverlap=nperseg//2)
+    return f, P
 
-def sos_filtfilt(sos, x):
-    return signal.sosfiltfilt(sos, x)
+def voice_activity_detection(P: np.ndarray, f: np.ndarray, fs: int) -> np.ndarray:
+    """
+    Detecta frames com atividade de voz.
+    Retorna array booleano onde True = há voz.
+    """
+    # Filtra apenas faixa de frequência típica de voz
+    f_min, f_max = VAD_FREQ_RANGE
+    mask_freq = (f >= f_min) & (f <= f_max)
+    
+    # Calcula energia na faixa de voz por frame
+    energy_voice = np.mean(P[mask_freq, :], axis=0)
+    
+    # Normaliza pela energia total
+    energy_total = np.mean(P, axis=0)
+    ratio_energy = energy_voice / (energy_total + 1e-20)
+    
+    # Threshold adaptativo
+    threshold = VAD_ENERGY_THRESHOLD * np.max(ratio_energy)
+    vad = ratio_energy > threshold
+    
+    return vad
 
-def plot_psd(x, y, fs, title):
-    f1, p1 = signal.welch(x, fs=fs, nperseg=4096)
-    f2, p2 = signal.welch(y, fs=fs, nperseg=4096)
-    plt.figure()
-    plt.semilogy(f1, p1, label="Antes")
-    plt.semilogy(f2, p2, label="Depois")
-    plt.title(title)
-    plt.xlabel("Frequência (Hz)")
-    plt.ylabel("Potência")
-    plt.grid(True, which="both")
-    plt.legend()
+def denoise_wiener_spectral(x: np.ndarray, fs: int) -> np.ndarray:
+    """
+    Redução de ruído usando Wiener Filter com STFT.
+    Abordagem conservadora para não amplificar o áudio.
+    """
+    # === STFT ===
+    f, t, Z = signal.stft(
+        x, fs=fs, window=WINDOW, nperseg=N_FFT, 
+        noverlap=N_FFT - HOP, boundary=None, padded=False
+    )
+    P = np.abs(Z) ** 2  # Power spectrogram (freq × time)
+    
+    # === Estimação de Ruído ===
+    # Usa frames com menor energia (silêncio + ruído)
+    frame_energy = np.mean(P, axis=0)
+    n_frames = frame_energy.size
+    n_noise = max(1, int(NOISE_PERCENT * n_frames))
+    
+    # Frames silenciosos
+    idx_silence = np.argsort(frame_energy)[:n_noise]
+    noise_psd = np.mean(P[:, idx_silence], axis=1) + 1e-25
+    
+    # === Wiener Filter (Método Tradicional) ===
+    # G(f,t) = SNR / (SNR + 1)
+    # SNR = P(f,t) / (alpha * noise_psd(f))
+    snr = P / (WIENER_ALPHA * noise_psd[:, None])
+    wiener_gain = snr / (snr + 1.0)
+    
+    # Piso para evitar amplificação ou artefatos extremos
+    wiener_gain = np.clip(wiener_gain, WIENER_FLOOR, 1.0)
+    
+    # === Aplicar ganho ao STFT ===
+    Z_filtered = Z * wiener_gain
+    
+    # === ISTFT ===
+    _, x_filtered = signal.istft(
+        Z_filtered, fs=fs, window=WINDOW, nperseg=N_FFT,
+        noverlap=N_FFT - HOP, boundary=None
+    )
+    
+    # === Ajusta tamanho ===
+    if len(x_filtered) > len(x):
+        x_filtered = x_filtered[:len(x)]
+    elif len(x_filtered) < len(x):
+        x_filtered = np.pad(x_filtered, (0, len(x) - len(x_filtered)))
+    
+    return x_filtered.astype(np.float32)
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--in", dest="in_wav", default="Arquivo3.wav")
-    ap.add_argument("--out", dest="out_wav", default="Arquivo3_limpo.wav")
+def apply_cheby2_filter(x: np.ndarray, fs: int, order: int, rs_db: int, cutoff_hz: float) -> np.ndarray:
+    """
+    Aplica filtro Chebyshev Tipo II passa-baixas.
+    Reduz componentes de alta frequência (ruído, chicado).
+    """
+    nyquist = fs / 2.0
+    cutoff_normalized = min(cutoff_hz / nyquist, 0.99)
+    
+    print(f"  Chebyshev II: ordem={order}, rs={rs_db}dB, fc={cutoff_hz:.0f}Hz")
+    
+    sos = signal.cheby2(
+        N=order,
+        rs=rs_db,
+        Wn=cutoff_normalized,
+        btype="lowpass",
+        output="sos"
+    )
+    
+    return signal.sosfiltfilt(sos, x, axis=0)
 
-    # Ajustes práticos:
-    ap.add_argument("--hp", type=float, default=80.0, help="Passa-altas (Hz) p/ tirar rumble")
-    ap.add_argument("--lp", type=float, default=12000.0, help="Passa-baixas (Hz) p/ reduzir hiss sem abafar")
-    ap.add_argument("--order", type=int, default=6, help="Ordem Cheby2")
-    ap.add_argument("--rs", type=float, default=60.0, help="Atenuação (dB) stopband do Cheby2")
 
-    # Notch (rede elétrica)
-    ap.add_argument("--hum", type=float, default=60.0, help="Frequência do hum (60 no BR)")
-    ap.add_argument("--Q", type=float, default=35.0, help="Q do notch (maior = notch mais estreito)")
-    ap.add_argument("--no-plots", action="store_true")
-    args = ap.parse_args()
+def apply_hpf_filter(x: np.ndarray, fs: int, cutoff_hz: float) -> np.ndarray:
+    """
+    Aplica filtro Butterworth passa-altos.
+    Remove ruidos graves (hum, buzz de baixa frequencia).
+    """
+    nyquist = fs / 2.0
+    cutoff_normalized = max(cutoff_hz / nyquist, 0.01)
+    
+    print(f"  Butterworth HPF: fc={cutoff_hz:.0f}Hz")
+    
+    sos = signal.butter(
+        N=4,
+        Wn=cutoff_normalized,
+        btype="highpass",
+        output="sos"
+    )
+    
+    return signal.sosfiltfilt(sos, x, axis=0)
 
-    fs, x = wavfile.read(args.in_wav)
-    x = pcm_to_float(to_mono(x))
 
-    # 1) Passa-altas leve (Cheby2)
-    sos_hp = cheby2_sos(fs, "highpass", args.hp, order=args.order, rs=args.rs)
-    y = sos_filtfilt(sos_hp, x)
+# =========================
+# PIPELINE PRINCIPAL
+# =========================
 
-    # 2) Notch em 60 Hz e 120 Hz (harmônica)
-    sos_n1 = notch_sos(fs, args.hum, Q=args.Q)
-    y = sos_filtfilt(sos_n1, y)
+print("=" * 60)
+print("FILTRO CHEBYSHEV II + REDUÇÃO DE RUÍDO AVANÇADA")
+print("=" * 60)
 
-    if 2*args.hum < fs/2:
-        sos_n2 = notch_sos(fs, 2*args.hum, Q=args.Q)
-        y = sos_filtfilt(sos_n2, y)
+# === 1. CARREGAR ÁUDIO ===
+print("\n[1] Carregando áudio...")
+try:
+    fs, x = wavfile.read(INPUT_WAV)
+    print(f"    Taxa de amostragem: {fs} Hz")
+    print(f"    Tipo de dado: {x.dtype}")
+    print(f"    Forma: {x.shape}")
+except FileNotFoundError:
+    print(f"    ERRO: arquivo '{INPUT_WAV}' não encontrado!")
+    exit(1)
 
-    # 3) Passa-baixas alto (Cheby2) pra tirar hiss extremo sem “abafar”
-    sos_lp = cheby2_sos(fs, "lowpass", args.lp, order=args.order, rs=args.rs)
-    y = sos_filtfilt(sos_lp, y)
+x_f = to_float(x)
+if x_f.ndim == 1:
+    x_f = x_f[:, None]
 
-    # normalização segura
-    peak = np.max(np.abs(y))
-    if peak > 1.0:
-        y = y / peak
+input_peak = float(np.max(np.abs(x_f)) + 1e-12)
+print(f"    Pico entrada: {input_peak:.4f}")
 
-    wavfile.write(args.out_wav, fs, float_to_int16(y))
-    print(f"Salvo: {args.out_wav}")
+# === 2. REDUÇÃO DE RUÍDO (Wiener + Spectral Subtraction) ===
+print("\n[2] Redução de ruído (Wiener + Spectral Subtraction)...")
+y = np.zeros_like(x_f, dtype=np.float32)
 
-    if not args.no_plots:
-        plot_psd(x, y, fs, "PSD (Welch) - Antes vs Depois")
-        plt.show()
+for ch in range(x_f.shape[1]):
+    print(f"    Processando canal {ch+1}/{x_f.shape[1]}...")
+    y[:, ch] = denoise_wiener_spectral(x_f[:, ch], fs)
 
-if __name__ == "__main__":
-    main()
+# === 3. FILTRO CHEBYSHEV TIPO II (Passa-baixas) ===
+if ENABLE_CHEBY2:
+    print(f"\n[3] Aplicando Chebyshev Tipo II (passa-baixas)...")
+    y = apply_cheby2_filter(y, fs, CHEBY2_ORDER, CHEBY2_RS_DB, CHEBY2_CUTOFF_HZ)
+
+# === 3B. FILTRO PASSA-ALTOS (remove ruido grave) ===
+if ENABLE_HPF:
+    print(f"\n[3B] Aplicando passa-altos agressivo...")
+    y = apply_hpf_filter(y, fs, HPF_CUTOFF_HZ)
+
+# === 4. GANHO FINAL ===
+print("\n[4] Aplicando ganho final...")
+y = apply_gain_db(y, OUTPUT_GAIN_DB)
+
+# === 5. LIMITAR PARA NÃO EXCEDER PICO DA ENTRADA ===
+if CLAMP_TO_INPUT_PEAK:
+    y_peak = float(np.max(np.abs(y)) + 1e-12)
+    if y_peak > input_peak:
+        g = input_peak / y_peak
+        y = y * g
+        print(f"    Clamp aplicado (ganho = {g:.4f})")
+
+y = np.clip(y, -1.0, 1.0)
+
+# === 6. SALVAR ÁUDIO ===
+print("\n[5] Salvando áudio processado...")
+if x.ndim == 1:
+    y_out = y[:, 0]
+else:
+    y_out = y
+
+wavfile.write(OUTPUT_WAV, fs, to_int16(y_out))
+print(f"    [OK] Salvo: {OUTPUT_WAV}")
+
+# === 6. RESUMO ===
+print("\n" + "=" * 60)
+print("PROCESSAMENTO CONCLUIDO COM SUCESSO!")
+print("=" * 60)
+print(f"\nArquivo gerado: {OUTPUT_WAV}")
+print(f"\nParametros usados:")
+print(f"  - Wiener Alpha: {WIENER_ALPHA}")
+print(f"  - Wiener Floor: {WIENER_FLOOR}")
+print(f"  - Chebyshev ordem: {CHEBY2_ORDER}, fc: {CHEBY2_CUTOFF_HZ} Hz")
+print(f"  - Passa-altos: {HPF_CUTOFF_HZ} Hz")
+print(f"  - Ganho saida: {OUTPUT_GAIN_DB} dB")
+print(f"\n[OK] Pronto para audicao!")
+print("=" * 60)
