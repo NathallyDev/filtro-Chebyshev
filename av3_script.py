@@ -34,13 +34,13 @@ VAD_ENERGY_THRESHOLD = 0.005  # limiar de energia relativa
 VAD_FREQ_RANGE = (80, 8000)   # faixa de frequência típica da voz
 
 # === Wiener Filter (ULTRA AGRESSIVO) ===
-WIENER_ALPHA = 5.5           # aumentado um pouco para mais reducao
-WIENER_FLOOR = 0.025         # reduzido para mais agressividade
-NOISE_PERCENT = 0.38         # aumentado um pouco
+WIENER_ALPHA = 5.4           # aumentado um pouco
+WIENER_FLOOR = 0.027         # um pouco mais agressivo
+NOISE_PERCENT = 0.37         # ajustado
 
 # === Spectral Gating ===
 ENABLE_SPECTRAL_GATE = True
-GATE_THRESHOLD = 0.05        # AUMENTADO para ser muito menos agressivo (preserva musica)
+GATE_THRESHOLD = 0.055       # reduzido bem levemente
 
 # === Noise Gate no dominio do tempo ===
 ENABLE_NOISE_GATE = True
@@ -56,7 +56,7 @@ SPECTRAL_SUB_FACTOR = 0.6    # fator de subtração espectral (0.5~0.8, mais bai
 ENABLE_CHEBY2 = True
 CHEBY2_ORDER = 8             # ordem MUITO alta (extremamente abrupto)
 CHEBY2_RS_DB = 100            # atenuacao maxima
-CHEBY2_CUTOFF_HZ = 7000      # REDUZIDO para 7kHz para cortar mais xiado
+CHEBY2_CUTOFF_HZ = 7200      # reduzido levemente para cortar mais xiado
 
 # Passa-altos para remover ruído grave
 ENABLE_HPF = True
