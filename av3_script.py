@@ -34,9 +34,13 @@ VAD_ENERGY_THRESHOLD = 0.005  # limiar de energia relativa
 VAD_FREQ_RANGE = (80, 8000)   # faixa de frequência típica da voz
 
 # === Wiener Filter (ULTRA AGRESSIVO) ===
-WIENER_ALPHA = 4.5           # muito agressivo (máxima redução de ruído)
-WIENER_FLOOR = 0.05          # muito baixo (permite corte radical)
-NOISE_PERCENT = 0.35         # detecta muito mais ruído
+WIENER_ALPHA = 6.0           # maximo agressivo
+WIENER_FLOOR = 0.02          # muito muito baixo (quase silencia tudo fraco)
+NOISE_PERCENT = 0.40         # detecta 40% dos frames como ruido
+
+# === Spectral Gating ===
+ENABLE_SPECTRAL_GATE = True
+GATE_THRESHOLD = 0.08        # limiar de gate MUITO agressivo (silencia valores baixos)
 
 # === Spectral Subtraction ===
 SPECTRAL_SUB_FACTOR = 0.6    # fator de subtração espectral (0.5~0.8, mais baixo = menos agressivo)
@@ -44,13 +48,13 @@ SPECTRAL_SUB_FACTOR = 0.6    # fator de subtração espectral (0.5~0.8, mais bai
 # === Chebyshev Tipo II ===
 # === Filtros passa-baixas + passa-altos (agressivos) ===
 ENABLE_CHEBY2 = True
-CHEBY2_ORDER = 7             # ordem muito alta (muito abrupto)
-CHEBY2_RS_DB = 80             # máxima atenuação
-CHEBY2_CUTOFF_HZ = 10000     # corta tudo acima de 10kHz (remove chiado agressivamente)
+CHEBY2_ORDER = 8             # ordem MUITO alta (extremamente abrupto)
+CHEBY2_RS_DB = 100            # atenuacao maxima
+CHEBY2_CUTOFF_HZ = 8000      # corta TUDO acima de 8kHz (remove MUITO chiado)
 
 # Passa-altos para remover ruído grave
 ENABLE_HPF = True
-HPF_CUTOFF_HZ = 80            # remove tudo abaixo de 80Hz (ruído grave/hum)
+HPF_CUTOFF_HZ = 300           # remove tudo abaixo de 300Hz (remove rumbling)
 
 # === Processamento Final ===
 CLAMP_TO_INPUT_PEAK = True
@@ -115,7 +119,7 @@ def voice_activity_detection(P: np.ndarray, f: np.ndarray, fs: int) -> np.ndarra
 def denoise_wiener_spectral(x: np.ndarray, fs: int) -> np.ndarray:
     """
     Redução de ruído usando Wiener Filter com STFT.
-    Abordagem conservadora para não amplificar o áudio.
+    VERSÃO ULTRA AGRESSIVA com spectral gating.
     """
     # === STFT ===
     f, t, Z = signal.stft(
@@ -125,28 +129,29 @@ def denoise_wiener_spectral(x: np.ndarray, fs: int) -> np.ndarray:
     P = np.abs(Z) ** 2  # Power spectrogram (freq × time)
     
     # === Estimação de Ruído ===
-    # Usa frames com menor energia (silêncio + ruído)
     frame_energy = np.mean(P, axis=0)
     n_frames = frame_energy.size
     n_noise = max(1, int(NOISE_PERCENT * n_frames))
     
-    # Frames silenciosos
     idx_silence = np.argsort(frame_energy)[:n_noise]
     noise_psd = np.mean(P[:, idx_silence], axis=1) + 1e-25
     
-    # === Wiener Filter (Método Tradicional) ===
-    # G(f,t) = SNR / (SNR + 1)
-    # SNR = P(f,t) / (alpha * noise_psd(f))
+    # === Wiener Gain ===
     snr = P / (WIENER_ALPHA * noise_psd[:, None])
-    wiener_gain = snr / (snr + 1.0)
+    G = snr / (snr + 1.0)
+    G = np.clip(G, WIENER_FLOOR, 1.0)
     
-    # Piso para evitar amplificação ou artefatos extremos
-    wiener_gain = np.clip(wiener_gain, WIENER_FLOOR, 1.0)
+    # === Spectral Gating (elimina tudo muito fraco) ===
+    if ENABLE_SPECTRAL_GATE:
+        # Gate agressivo: silencia qualquer coisa abaixo do threshold
+        frame_max = np.max(P, axis=0)
+        gate = (P / (frame_max + 1e-20)) > GATE_THRESHOLD
+        G = G * gate.astype(float)
     
-    # === Aplicar ganho ao STFT ===
-    Z_filtered = Z * wiener_gain
+    # === Aplica ganho ===
+    Z_filtered = Z * G
     
-    # === ISTFT ===
+    # === iSTFT ===
     _, x_filtered = signal.istft(
         Z_filtered, fs=fs, window=WINDOW, nperseg=N_FFT,
         noverlap=N_FFT - HOP, boundary=None
@@ -275,8 +280,9 @@ print("PROCESSAMENTO CONCLUIDO COM SUCESSO!")
 print("=" * 60)
 print(f"\nArquivo gerado: {OUTPUT_WAV}")
 print(f"\nParametros usados:")
-print(f"  - Wiener Alpha: {WIENER_ALPHA}")
+print(f"  - Wiener Alpha: {WIENER_ALPHA} (ULTRA AGRESSIVO)")
 print(f"  - Wiener Floor: {WIENER_FLOOR}")
+print(f"  - Spectral Gate: {GATE_THRESHOLD}")
 print(f"  - Chebyshev ordem: {CHEBY2_ORDER}, fc: {CHEBY2_CUTOFF_HZ} Hz")
 print(f"  - Passa-altos: {HPF_CUTOFF_HZ} Hz")
 print(f"  - Ganho saida: {OUTPUT_GAIN_DB} dB")
