@@ -54,7 +54,6 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from scipy import signal
 from scipy.io import wavfile
-import os
 
 
 # ==============================================================================
@@ -64,7 +63,7 @@ import os
 # Arquivos de entrada e saída
 INPUT_WAV  = "Arquivo3.wav"
 OUTPUT_WAV = "Arquivo3_filtrado_v2.wav"
-OUTPUT_FIG = "av3_analise.png"             # Figura de análise espectral
+OUTPUT_FIG = "av3_analise.png"          # Figura de análise espectral
 OUTPUT_FIG_RESP = "av3_resposta_freq.png"  # Figura da resposta em frequência do filtro
 
 # --- Parâmetros da STFT (Short-Time Fourier Transform) ---
@@ -84,7 +83,7 @@ WINDOW  = "hamming"
 #                 do sinal (artefatos de "buraco" espectral).
 # NOISE_PERCENT : Fração dos frames de menor energia usada para estimar o PSD
 #                 (Power Spectral Density) do ruído de fundo.
-WIENER_ALPHA   = 7.0
+WIENER_ALPHA   = 5.4
 WIENER_FLOOR   = 0.027
 NOISE_PERCENT  = 0.37
 
@@ -244,21 +243,32 @@ def denoise_wiener_spectral(x: np.ndarray, fs: int) -> np.ndarray:
     n_frames     = frame_energy.size
     n_noise      = max(1, int(NOISE_PERCENT * n_frames))
     idx_silence  = np.argsort(frame_energy)[:n_noise]
-    noise_psd    = np.mean(P[:, idx_silence], axis=1) + 1e-25  # +ε evita divisão por zero
+    noise_psd    = np.median(P[:, idx_silence], axis=1) + 1e-25
 
-    # Razão sinal-ruído estimada para cada bin tempo-frequência
-    snr = P / (WIENER_ALPHA * noise_psd[:, None])
+    # Subtração espectral suave para reduzir componente estacionária do ruído
+    spectral_sub_factor = 0.5
+    P_clean = np.maximum(P - spectral_sub_factor * noise_psd[:, None], 1e-25)
 
-    # Ganho de Wiener: suprime regiões de baixa SNR
+    # Razão sinal-ruído estimada para cada bin tempo-frequência (após subtração)
+    snr = P_clean / (WIENER_ALPHA * noise_psd[:, None])
+
+    # Ganho de Wiener inicial
     G = snr / (snr + 1.0)
     G = np.clip(G, WIENER_FLOOR, 1.0)
 
-    # Spectral Gate: máscara binária adicional que elimina componentes
-    # cuja energia relativa ao pico do frame é inferior a GATE_THRESHOLD
+    # Spectral Gate: máscara suave (rampa) em vez de binária para evitar cortes
     if ENABLE_SPECTRAL_GATE:
         frame_max = np.max(P, axis=0)
-        gate      = (P / (frame_max + 1e-20)) > GATE_THRESHOLD
-        G         = G * gate.astype(float)
+        rel = P / (frame_max + 1e-20)
+        gate_factor = np.clip((rel - GATE_THRESHOLD) / (1.0 - GATE_THRESHOLD), 0.0, 1.0)
+        G = G * gate_factor
+
+    # Suavização temporal do ganho por enquadramento para reduzir "musical noise"
+    TF_SMOOTH_FRAMES = 7
+    if TF_SMOOTH_FRAMES > 1:
+        win = np.ones(TF_SMOOTH_FRAMES, dtype=float) / float(TF_SMOOTH_FRAMES)
+        # operação por bin de frequência (eixo 0 -> frequência)
+        G = np.array([np.convolve(G_i, win, mode="same") for G_i in G])
 
     # Aplica o ganho no domínio espectral e reconstrói o sinal pelo ISTFT
     Z_filtered = Z * G
@@ -520,11 +530,9 @@ def plot_frequency_response(fs: int, fig_path: str) -> None:
     ax.grid(True, alpha=0.4)
 
     plt.tight_layout()
-    os.makedirs(os.path.dirname(fig_path) or ".", exist_ok=True)
-    abs_path = os.path.abspath(fig_path)
-    plt.savefig(abs_path, dpi=150, bbox_inches="tight")
+    plt.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"    Figura salva: {abs_path}")
+    print(f"    Figura salva: {fig_path}")
 
 
 def plot_analysis(x_orig: np.ndarray, y_proc: np.ndarray,
@@ -631,11 +639,9 @@ def plot_analysis(x_orig: np.ndarray, y_proc: np.ndarray,
     ax5.legend(fontsize=9)
     ax5.grid(True, alpha=0.4)
 
-    os.makedirs(os.path.dirname(fig_path) or ".", exist_ok=True)
-    abs_path = os.path.abspath(fig_path)
-    plt.savefig(abs_path, dpi=150, bbox_inches="tight")
+    plt.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"    Figura salva: {abs_path}")
+    print(f"    Figura salva: {fig_path}")
 
 
 def print_signal_metrics(x_orig: np.ndarray, y_proc: np.ndarray, fs: int) -> None:
@@ -727,7 +733,6 @@ if ENABLE_NOISE_GATE:
     print(f"      Tamanho bloco: 10 ms")
     for ch in range(y.shape[1]):
         y[:, ch] = apply_noise_gate(y[:, ch], fs, NOISE_GATE_THRESHOLD)
-
 # ---- Etapa 6: Ganho de saída e normalização ----
 print("\n[6/8] Aplicando ganho de saída e normalização...")
 y        = apply_gain_db(y, OUTPUT_GAIN_DB)
