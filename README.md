@@ -165,9 +165,3 @@ filtro-Chebyshev/
 ### Para processar mais rápido:
 - Diminua `N_FFT` (p.ex. 1024)
 - Aumente `HOP` (p.ex. 1024)
-
----
-
-## ✨ Autor
-
-Desenvolvido com ❤️ para processamento digital de sinais de áudio.
